@@ -2101,8 +2101,49 @@
             window.addEventListener('click', handleModalClose);
         }
 
+
+        // Only this tool's keys are read, migrated or removed.
+        const STALL_STORAGE_KEYS = ['foodThemes', 'aiAnalysisResult', 'studentNames', 'assignmentData', 'rotationStudents', 'shiftsData'];
+        const STALL_STORAGE_PREFIX = 'lssh.stall.v1.';
+        function stallGet(key) {
+            if (!STALL_STORAGE_KEYS.includes(key)) throw new Error('未知攤位資料鍵');
+            const current = localStorage.getItem(STALL_STORAGE_PREFIX + key);
+            if (current !== null) return current;
+            const legacy = localStorage.getItem(key);
+            if (legacy !== null) {
+                try { localStorage.setItem(STALL_STORAGE_PREFIX + key, legacy); }
+                catch (error) { showNotification('舊資料可讀取，但新格式儲存失敗，請先保留備份。', 'error'); }
+            }
+            return legacy;
+        }
+        function stallJSON(key, fallback) {
+            try {
+                const raw = stallGet(key);
+                if (raw === null) return fallback;
+                const parsed = JSON.parse(raw);
+                if (!Array.isArray(parsed)) throw new Error('資料應為清單');
+                if (key === 'foodThemes' && !parsed.every(t => t && typeof t.name === 'string' && Array.isArray(t.selectedFoods) && t.selectedFoods.every(f => f && typeof f.name === 'string'))) throw new Error('主題格式不正確');
+                if (key === 'assignmentData' && !parsed.every(t => t && typeof t.name === 'string' && Array.isArray(t.students) && t.students.every(n => typeof n === 'string'))) throw new Error('工作格式不正確');
+                if (key === 'shiftsData' && !parsed.every(t => t && typeof t.start === 'string' && typeof t.end === 'string' && Number.isFinite(Number(t.people)) && Number(t.people) > 0 && Array.isArray(t.students) && t.students.every(n => typeof n === 'string'))) throw new Error('輪值格式不正確');
+                return parsed;
+            } catch (error) {
+                showNotification('部分舊攤位資料無法讀取，原資料保留，其他功能可繼續使用。', 'error');
+                return fallback;
+            }
+        }
+        function stallSet(key, value) {
+            if (!STALL_STORAGE_KEYS.includes(key)) throw new Error('未知攤位資料鍵');
+            localStorage.setItem(STALL_STORAGE_PREFIX + key, value);
+        }
+        function stallRemove(key) {
+            if (!STALL_STORAGE_KEYS.includes(key)) throw new Error('未知攤位資料鍵');
+            localStorage.removeItem(STALL_STORAGE_PREFIX + key);
+            localStorage.removeItem(key); // Known legacy keys only; prevents deleted data returning.
+        }
+
         // Theme management functions
         function saveTheme() {
+            try {
             const themeName = elements.themeNameInput.value.trim();
             if (!themeName) {
                 showNotification('請輸入攤位主題名稱！', 'warning');
@@ -2117,7 +2158,7 @@
                 });
             });
             
-            const themes = JSON.parse(localStorage.getItem('foodThemes')) || [];
+            const themes = stallJSON('foodThemes', []);
             const themeData = { name: themeName, selectedFoods };
             const existingIndex = themes.findIndex(t => t.name === themeName);
             
@@ -2127,9 +2168,11 @@
                 themes.push(themeData);
             }
             
-            localStorage.setItem('foodThemes', JSON.stringify(themes));
+            stallSet('foodThemes', JSON.stringify(themes));
             loadThemes();
             showNotification('攤位主題和選擇的食物已儲存！');
+        
+            } catch (error) { showNotification("儲存失敗，資料仍在畫面上；請勿關閉頁面。", "error"); }
         }
 
         function loadTheme() {
@@ -2139,7 +2182,7 @@
                 return;
             }
             
-            const themes = JSON.parse(localStorage.getItem('foodThemes')) || [];
+            const themes = stallJSON('foodThemes', []);
             const theme = themes.find(t => t.name === selectedTheme);
             
             if (theme) {
@@ -2153,7 +2196,7 @@
                 
                 // Select theme foods
                 theme.selectedFoods.forEach(foodItem => {
-                    const checkbox = document.querySelector(`.food-checkbox[value="${foodItem.name}"]`);
+                    const checkbox = [...document.querySelectorAll('.food-checkbox')].find(el => el.value === foodItem.name);
                     if (checkbox) {
                         checkbox.checked = true;
                         checkbox.closest('.food-item').classList.add('selected');
@@ -2167,7 +2210,7 @@
         }
 
         function loadThemes() {
-            const themes = JSON.parse(localStorage.getItem('foodThemes')) || [];
+            const themes = stallJSON('foodThemes', []);
             elements.themeSelect.innerHTML = '<option value="">選擇一個主題</option>';
             
             themes.forEach(theme => {
@@ -2179,9 +2222,9 @@
         }
 
         function deleteAllData() {
-            if (!confirm('確定要刪除所有資料嗎？此操作無法復原！')) return;
+            if (!confirm('確定要清除本攤位工具的主題、工作與輪值資料嗎？其他工具資料會保留。')) return;
             
-            localStorage.clear();
+            STALL_STORAGE_KEYS.forEach(stallRemove);
             
             // Reset UI
             elements.themeNameInput.value = '';
@@ -2204,7 +2247,7 @@
             elements.assignmentResult.style.display = 'none';
             elements.shiftsResult.style.display = 'none';
             
-            showNotification('所有資料已刪除！', 'error');
+            showNotification('攤位資料已清除；其他班級工具的資料保留。');
         }
 
         // Food management functions
@@ -2334,7 +2377,7 @@
                 return;
             }
             
-            localStorage.setItem('aiAnalysisResult', analysisText);
+            stallSet('aiAnalysisResult', analysisText);
             showNotification('AI分析結果已儲存！');
         }
 
@@ -2967,24 +3010,38 @@
 
         function assignRandomStudentsToShift(shiftIndex) {
             const shift = shifts[shiftIndex];
-            const allStudents = elements.rotationStudentsInput.value.split('\n')
+            const allStudents = [...new Set(elements.rotationStudentsInput.value.split('\n')
                 .map(s => s.trim())
-                .filter(s => s);
+                .filter(s => s))];
             
             if (allStudents.length === 0) {
                 showNotification('請先輸入人員姓名！', 'warning');
                 return;
             }
             
-            if (allStudents.length < shift.people) {
-                showNotification(`人員數不足，班次 ${shiftIndex + 1} 需要 ${shift.people} 人。`, 'warning');
+            // 保留目前手動選取的人員，只從尚未選取的人員中補足缺額。
+            const currentStudents = [...new Set(shift.students || [])];
+            const vacancies = Math.max(0, shift.people - currentStudents.length);
+
+            if (vacancies === 0) {
+                shift.students = currentStudents;
+                document.getElementById(`shift-students-${shiftIndex}`).textContent = currentStudents.join(', ');
+                showNotification(`班次 ${shiftIndex + 1} 已有足夠人員，保留原有安排。`);
                 return;
             }
             
-            const selectedStudents = [...allStudents].sort(() => 0.5 - Math.random()).slice(0, shift.people);
-            shift.students = selectedStudents;
-            document.getElementById(`shift-students-${shiftIndex}`).textContent = selectedStudents.join(', ');
-            showNotification(`已隨機分配班次 ${shiftIndex + 1}。`);
+            const availableStudents = allStudents.filter(student => !currentStudents.includes(student));
+            const additionalStudents = availableStudents
+                .sort(() => 0.5 - Math.random())
+                .slice(0, vacancies);
+            shift.students = [...currentStudents, ...additionalStudents];
+            document.getElementById(`shift-students-${shiftIndex}`).textContent = shift.students.join(', ');
+
+            if (additionalStudents.length < vacancies) {
+                showNotification(`班次 ${shiftIndex + 1} 已保留原有人員，但可補充分配的人員不足。`, 'warning');
+            } else {
+                showNotification(`班次 ${shiftIndex + 1} 已保留原有人員並隨機補足缺額。`);
+            }
         }
 
         function selectStudentsForShift(shiftIndex) {
@@ -3053,6 +3110,7 @@
 
         // Data management functions
         function saveAssignmentData() {
+            try {
             const studentNames = elements.studentNamesInput.value;
             const assignmentData = tasks.map(task => ({
                 name: task.name,
@@ -3061,16 +3119,18 @@
                 students: task.students
             }));
             
-            localStorage.setItem('studentNames', studentNames);
-            localStorage.setItem('assignmentData', JSON.stringify(assignmentData));
+            stallSet('studentNames', studentNames);
+            stallSet('assignmentData', JSON.stringify(assignmentData));
             showNotification('人員資料與工作分配結果已儲存！');
+        
+            } catch (error) { showNotification("儲存失敗，資料仍在畫面上；請勿關閉頁面。", "error"); }
         }
 
         function clearAssignmentData() {
             if (!confirm('確定要清除儲存的人員資料與工作分配結果嗎？')) return;
             
-            localStorage.removeItem('studentNames');
-            localStorage.removeItem('assignmentData');
+            stallRemove('studentNames');
+            stallRemove('assignmentData');
             
             elements.studentNamesInput.value = '';
             tasks.forEach(task => task.students = []);
@@ -3081,17 +3141,20 @@
         }
 
         function saveShiftData() {
+            try {
             const rotationStudentsData = elements.rotationStudentsInput.value.trim();
-            localStorage.setItem('rotationStudents', rotationStudentsData);
-            localStorage.setItem('shiftsData', JSON.stringify(shifts));
+            stallSet('rotationStudents', rotationStudentsData);
+            stallSet('shiftsData', JSON.stringify(shifts));
             showNotification('人員姓名資料和班次分配表已儲存！');
+        
+            } catch (error) { showNotification("儲存失敗，資料仍在畫面上；請勿關閉頁面。", "error"); }
         }
 
         function clearShiftData() {
             if (!confirm('確定要清除人員姓名資料和班次分配表嗎？')) return;
             
-            localStorage.removeItem('rotationStudents');
-            localStorage.removeItem('shiftsData');
+            stallRemove('rotationStudents');
+            stallRemove('shiftsData');
             
             elements.rotationStudentsInput.value = '';
             shifts = [];
@@ -3272,22 +3335,22 @@
             loadThemes();
             
             // Load AI analysis
-            const savedAnalysis = localStorage.getItem('aiAnalysisResult');
+            const savedAnalysis = stallGet('aiAnalysisResult');
             if (savedAnalysis) {
                 elements.aiAnalysisInput.value = savedAnalysis;
                 autoResizeTextarea(elements.aiAnalysisInput);
             }
             
             // Load assignment data
-            const savedStudentNames = localStorage.getItem('studentNames');
-            const savedAssignmentData = localStorage.getItem('assignmentData');
+            const savedStudentNames = stallGet('studentNames');
+            const savedAssignmentData = stallGet('assignmentData');
             
             if (savedStudentNames) {
                 elements.studentNamesInput.value = savedStudentNames;
             }
             
             if (savedAssignmentData) {
-                const parsedData = JSON.parse(savedAssignmentData);
+                const parsedData = stallJSON('assignmentData', []);
                 if (Array.isArray(parsedData) && parsedData.length > 0) {
                     tasks = parsedData.map(task => ({
                         name: task.name,
@@ -3299,14 +3362,14 @@
             }
             
             // Load shift data
-            const savedRotationStudents = localStorage.getItem('rotationStudents');
+            const savedRotationStudents = stallGet('rotationStudents');
             if (savedRotationStudents) {
                 elements.rotationStudentsInput.value = savedRotationStudents;
             }
             
-            const savedShifts = localStorage.getItem('shiftsData');
+            const savedShifts = stallGet('shiftsData');
             if (savedShifts) {
-                shifts = JSON.parse(savedShifts);
+                shifts = stallJSON('shiftsData', []);
                 renderShifts();
                 elements.shiftsResult.style.display = 'block';
             }
